@@ -9,13 +9,14 @@
  */
 
 import { useState, useCallback } from 'react'
-import { 
-  generateAICodeForParameterChange, 
+import {
+  generateAICodeForParameterChange,
   generateAICodeImprovement,
   AICodeGenerationRequest,
   AICodeImprovementRequest,
   AICodeGenerationResponse
 } from '@/lib/api-service'
+import { debugLog, debugError, debugObject } from '@/lib/debug'
 
 export interface UseAICodeGenerationReturn {
   // State
@@ -56,41 +57,41 @@ export function useAICodeGeneration(): UseAICodeGenerationReturn {
   const generateCodeForParameter = useCallback(async (
     request: AICodeGenerationRequest
   ): Promise<AICodeGenerationResponse> => {
-    console.log('🎣 [HOOK] generateCodeForParameter called:', {
+    debugObject('HOOK', 'generateCodeForParameter called', {
       nodeId: request.nodeId,
       parameterName: request.parameterName,
       newValue: request.newValue
     });
-    
+
     setLastError(null)
-    console.log('🎣 [HOOK] Setting node as updating:', request.nodeId);
+    debugLog('HOOK', 'Setting node as updating:', request.nodeId);
     setNodeUpdating(request.nodeId, true)
-    
+
     try {
-      console.log('🎣 [HOOK] Calling generateAICodeForParameterChange...');
+      debugLog('HOOK', 'Calling generateAICodeForParameterChange...');
       const response = await generateAICodeForParameterChange(request)
-      
-      console.log('🎣 [HOOK] generateAICodeForParameterChange response:', {
+
+      debugObject('HOOK', 'generateAICodeForParameterChange response', {
         success: response.success,
         hasCode: !!response.code,
         error: response.error
       });
-      
+
       if (!response.success) {
         setLastError(response.error || 'Failed to generate code')
       }
-      
+
       return response
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-      console.error('🎣 [HOOK] Error in generateCodeForParameter:', errorMessage);
+      debugError('HOOK', 'Error in generateCodeForParameter:', errorMessage);
       setLastError(errorMessage)
       return {
         success: false,
         error: errorMessage
       }
     } finally {
-      console.log('🎣 [HOOK] Setting node as not updating:', request.nodeId);
+      debugLog('HOOK', 'Setting node as not updating:', request.nodeId);
       setNodeUpdating(request.nodeId, false)
     }
   }, [setNodeUpdating])

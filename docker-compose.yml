@@ -1,0 +1,155 @@
+# Copyright contributors to the Qiskit Studio project
+# SPDX-License-Identifier: Apache-2.0
+#
+# One-command local stack for Qiskit Studio.
+#
+#   docker compose up --build            # frontend + 3 agents + RAG (milvus, knowledge-mcp)
+#   docker compose --profile preload up  # also (re)populate the vector DB with Qiskit docs
+#
+# Prerequisites:
+#   * An OpenAI-compatible LLM endpoint reachable from the containers. By default
+#     this points at a host-local Ollama (http://host.docker.internal:11434/v1)
+#     serving `granite3.3:8b` (chat/codegen) and `nomic-embed-text` (embeddings).
+#     Pull them first:  ollama pull granite3.3:8b && ollama pull nomic-embed-text
+#   * Copy .env.docker.template to .env to override any of the defaults below.
+#
+# All knobs come from the environment (see .env.docker.template) and fall back to
+# sane local defaults, so `docker compose up --build` works out of the box.
+
+x-llm-env: &llm-env
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-http://host.docker.internal:11434/v1}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-dummy}
+  CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-http://localhost:3000}
+
+services:
+  # ---------------------------------------------------------------------------
+  # Vector database (Milvus standalone with embedded etcd + local storage).
+  # Mirrors the Helm chart's milvus deployment.
+  # ---------------------------------------------------------------------------
+  milvus:
+    image: milvusdb/milvus:v2.6.1
+    command: ["/milvus/bin/milvus", "run", "standalone"]
+    environment:
+      ETCD_USE_EMBED: "true"
+      ETCD_DATA_DIR: /var/lib/milvus/etcd
+      ETCD_CONFIG_PATH: /milvus/configs/embedEtcd.yaml
+      COMMON_STORAGETYPE: local
+      DEPLOY_MODE: STANDALONE
+    volumes:
+      - milvus-data:/var/lib/milvus
+      - ./docker/milvus/embedEtcd.yaml:/milvus/configs/embedEtcd.yaml:ro
+      - ./docker/milvus/user.yaml:/milvus/configs/user.yaml:ro
+    ports:
+      - "${MILVUS_GRPC_PORT:-19530}:19530"
+      - "${MILVUS_HTTP_PORT:-9091}:9091"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Maestro Knowledge MCP server — RAG retrieval over Milvus.
+  # ---------------------------------------------------------------------------
+  knowledge-mcp:
+    image: ghcr.io/ai4quantum/maestro-knowledge:latest
+    environment:
+      VECTOR_DB_TYPE: milvus
+      MILVUS_URI: http://milvus:19530
+      CUSTOM_EMBEDDING_URL: ${CUSTOM_EMBEDDING_URL:-http://host.docker.internal:11434/v1}
+      CUSTOM_EMBEDDING_MODEL: ${CUSTOM_EMBEDDING_MODEL:-nomic-embed-text}
+      CUSTOM_EMBEDDING_VECTORSIZE: ${CUSTOM_EMBEDDING_VECTORSIZE:-768}
+      CUSTOM_EMBEDDING_API_KEY: ${CUSTOM_EMBEDDING_API_KEY:-dummy}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${KNOWLEDGE_MCP_PORT:-8030}:8030"
+    depends_on:
+      milvus:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Chat agent (Maestro) — RAG-backed Q&A. Port 8000.
+  # The agents.docker.yaml override points the vector-DB agent at the
+  # knowledge-mcp service instead of localhost.
+  # ---------------------------------------------------------------------------
+  chat-agent:
+    build:
+      context: ./api/chat-agent
+    environment:
+      <<: *llm-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./api/chat-agent/agents.docker.yaml:/usr/src/app/agents.yaml:ro
+    ports:
+      - "${CHAT_PORT:-8000}:8000"
+    depends_on:
+      - knowledge-mcp
+
+  # ---------------------------------------------------------------------------
+  # Codegen agent (Maestro) — parameter/code updates. Port 8001 -> 8000.
+  # ---------------------------------------------------------------------------
+  codegen-agent:
+    build:
+      context: ./api/codegen-agent
+    environment:
+      <<: *llm-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${CODEGEN_PORT:-8001}:8000"
+
+  # ---------------------------------------------------------------------------
+  # Coderun agent (FastAPI) — executes Qiskit programs. Port 8002 -> 8000.
+  # ---------------------------------------------------------------------------
+  coderun-agent:
+    build:
+      context: ./api/coderun-agent
+    ports:
+      - "${CODERUN_PORT:-8002}:8000"
+
+  # ---------------------------------------------------------------------------
+  # Frontend (Next.js). Port 3000. The NEXT_PUBLIC_* URLs are used by the
+  # browser, so they must reference the host-published ports (localhost).
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: .
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://127.0.0.1:8000/chat}
+      NEXT_PUBLIC_PARAMETER_UPDATE_API_URL: ${NEXT_PUBLIC_PARAMETER_UPDATE_API_URL:-http://127.0.0.1:8001/chat}
+      NEXT_PUBLIC_RUNCODE_URL: ${NEXT_PUBLIC_RUNCODE_URL:-http://127.0.0.1:8002/run}
+      NEXT_PUBLIC_DEBUG: ${NEXT_PUBLIC_DEBUG:-false}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      - chat-agent
+      - codegen-agent
+      - coderun-agent
+
+  # ---------------------------------------------------------------------------
+  # One-shot RAG preloader. Populates the vector DB with Qiskit docs.
+  # Enable with:  docker compose --profile preload up preloader
+  # ---------------------------------------------------------------------------
+  preloader:
+    image: python:3.12-slim
+    profiles: ["preload"]
+    working_dir: /app
+    environment:
+      MCP_SERVER_URL: http://knowledge-mcp:8030/mcp/
+      JSON_ENCODED: "true"
+    volumes:
+      - ./api/chat-agent:/app:ro
+    command:
+      - /bin/sh
+      - -c
+      - |
+        pip install --no-cache-dir httpx html2text fastmcp &&
+        python3 scripts/add-rag-docs-remote-embed.py
+    depends_on:
+      - knowledge-mcp
+
+volumes:
+  milvus-data:

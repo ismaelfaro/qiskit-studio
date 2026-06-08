@@ -1,6 +1,57 @@
 # Qiskit Studio Backend API
 
-## Getting Started
+## Quick start with Docker Compose (recommended)
+
+The fastest way to run the **entire stack** (frontend, all three agents, and the
+RAG vector database) is the `docker-compose.yml` at the repository root. It
+replaces the multi-terminal setup described further below with a single command.
+
+Prerequisites:
+
+- Docker (with the Compose plugin)
+- An OpenAI-compatible LLM endpoint reachable from the containers. By default the
+  stack targets a host-local [Ollama](https://ollama.com):
+  ```bash
+  ollama pull granite3.3:8b      # chat + codegen model
+  ollama pull nomic-embed-text   # embeddings for RAG
+  ```
+
+Bring everything up from the repository root:
+
+```bash
+# optional: override defaults (ports, LLM URL, models, ...)
+cp .env.docker.template .env
+
+docker compose up --build
+```
+
+Services and ports:
+
+| Service        | URL                          | Purpose                         |
+| -------------- | ---------------------------- | ------------------------------- |
+| frontend       | http://127.0.0.1:3000        | Qiskit Studio UI                |
+| chat-agent     | http://127.0.0.1:8000/chat   | RAG-backed chat                 |
+| codegen-agent  | http://127.0.0.1:8001/chat   | Parameter / code updates        |
+| coderun-agent  | http://127.0.0.1:8002/run    | Executes Qiskit programs        |
+| knowledge-mcp  | http://127.0.0.1:8030        | Vector-DB retrieval (RAG)       |
+| milvus         | 127.0.0.1:19530 / :9091      | Vector database                 |
+
+Populate the vector DB with Qiskit documentation (one-shot, run after the stack
+is up so chat answers are grounded in the docs):
+
+```bash
+docker compose --profile preload run --rm preloader
+```
+
+> Note: On Linux, `host.docker.internal` is wired to the host gateway via
+> `extra_hosts`, so the containers can reach an Ollama running on your machine.
+> Point `OPENAI_BASE_URL` / `CUSTOM_EMBEDDING_URL` elsewhere in `.env` to use a
+> remote LLM provider.
+
+To run only the backend agents (no frontend), start the services you need, e.g.
+`docker compose up --build chat-agent codegen-agent coderun-agent`.
+
+## Getting Started (manual, without Compose)
 
 ### Agent Workflow API
 

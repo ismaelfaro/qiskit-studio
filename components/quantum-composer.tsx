@@ -40,6 +40,8 @@ import { loadDemoPythonCode, hasDemoPythonCode } from "@/lib/demo-python-loader"
 import { getHighlightedCodeForNode } from "@/lib/code-section-parser"
 import { parseDemoNodes } from "@/lib/demo-node-parser"
 import { useAICodeGeneration } from "@/hooks/useAICodeGeneration"
+import { WorkflowAgentPanel } from "./workflow-agent-panel"
+import type { GeneratedWorkflow } from "@/lib/workflow-agent"
 
 // Register custom node types
 const nodeTypes = {
@@ -729,14 +731,45 @@ function QuantumComposerInner() {
     }
   }, [handleNodeInputChange, handleParameterChange, setNodes, setEdges, fitView])
 
+  // Snapshot of the current canvas for the workflow agent (context for the LLM)
+  const getCurrentWorkflow = useCallback((): GeneratedWorkflow => {
+    return { nodes, edges }
+  }, [nodes, edges])
+
+  // Apply an AI-generated workflow, replacing the current canvas
+  const applyGeneratedWorkflow = useCallback((workflow: GeneratedWorkflow) => {
+    const enhancedNodes = workflow.nodes.map(node => ({
+      ...node,
+      data: {
+        ...node.data,
+        onInputChange: handleNodeInputChange,
+        onParameterChange: handleParameterChange,
+        isUpdating: false
+      }
+    }))
+
+    setNodes(enhancedNodes)
+    setEdges(workflow.edges)
+    setSelectedNode(null)
+    setCurrentDemoId(null)
+    setDemoPythonCode(null)
+    setHighlightSection(null)
+    setNodeInputs({})
+    setTimeout(() => fitView({ padding: 0.1 }), 100)
+  }, [handleNodeInputChange, handleParameterChange, setNodes, setEdges, fitView])
+
   return (
     <div className="flex h-screen">
-      <Sidebar 
-        onAddNode={onAddNode} 
-        onLoadDemo={onLoadDemo} 
+      <Sidebar
+        onAddNode={onAddNode}
+        onLoadDemo={onLoadDemo}
       />
       <div className="flex flex-1">
-        <div className="flex-1 h-full">
+        <div className="relative flex-1 h-full">
+          <WorkflowAgentPanel
+            getCurrentWorkflow={getCurrentWorkflow}
+            onApplyWorkflow={applyGeneratedWorkflow}
+          />
           <ReactFlow
             nodes={nodes}
             edges={edges}

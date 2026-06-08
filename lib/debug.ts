@@ -25,6 +25,7 @@ export const DEBUG_CATEGORIES = {
   COMPOSER: 'COMPOSER',
   NODES: 'NODES',
   PYTHON_CODE: 'PYTHON_CODE',
+  HOOK: 'HOOK',
   ALL: 'ALL'
 } as const;
 
@@ -75,6 +76,7 @@ function getCategoryEmoji(category: DebugCategory): string {
     case 'COMPOSER': return '🚀';
     case 'NODES': return '🎛️';
     case 'PYTHON_CODE': return '🎯';
+    case 'HOOK': return '🎣';
     case 'ALL': return '🔍';
     default: return '🔍';
   }

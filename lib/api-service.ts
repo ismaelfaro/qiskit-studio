@@ -10,12 +10,21 @@
 
 import { debugLog, debugError, debugObject, debugTime, debugTimeEnd } from './debug';
 
+/** A parameter value that can be sent to the code-generation API. */
+export type ParameterValue = string | number | boolean | Record<string, unknown>
+
+/** Shape of the responses returned by the Maestro / coderun backends. */
+interface BackendResponse {
+  response?: string
+  output?: string
+}
+
 export interface AICodeGenerationRequest {
   nodeId: string
   nodeType: string
   currentCode: string
   parameterName: string
-  newValue: any
+  newValue: ParameterValue
   nodeLabel?: string
   sessionId?: string
   qiskitPatternStep?: 'STEP 1' | 'STEP 2' | 'STEP 3' | 'STEP 4'
@@ -54,6 +63,34 @@ export interface AIStreamChatResponse {
   success: boolean
   stream?: ReadableStream<Uint8Array>
   error?: string
+}
+
+/**
+ * Build the standard chat payload shared by every backend call.
+ */
+function buildChatPayload(text: string, sessionId: string) {
+  return {
+    input_value: text,
+    output_type: "chat",
+    input_type: "chat",
+    session_id: sessionId,
+    prompt: text,
+  }
+}
+
+/**
+ * POST a JSON payload and return the parsed response, throwing on non-2xx.
+ */
+async function postJson(url: string, payload: unknown): Promise<BackendResponse> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) {
+    throw new Error(`API request failed with status ${response.status}`)
+  }
+  return response.json()
 }
 
 /**
@@ -195,26 +232,8 @@ export async function generateAICodeImprovement(
   const prompt = buildImprovementPrompt(request)
 
   try {
-    const payload = {
-      input_value: prompt,
-      output_type: "chat",
-      input_type: "chat",
-      session_id: request.sessionId || `improvement-${request.nodeId}`,
-      prompt: prompt,
-    }
-
-    const options = {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    }
-
-    const response = await fetch(process.env.NEXT_PUBLIC_API_URL!, options)
-    if (!response.ok) {
-      throw new Error(`API request failed with status ${response.status}`)
-    }
-
-    const result = await response.json()
+    const payload = buildChatPayload(prompt, request.sessionId || `improvement-${request.nodeId}`)
+    const result = await postJson(process.env.NEXT_PUBLIC_API_URL!, payload)
     const newCode = extractCodeFromResponse(result)
 
     return {
@@ -230,7 +249,7 @@ export async function generateAICodeImprovement(
 }
 
 /**
- * Generate AI chat responses for general queries
+ * Execute a quantum program via the coderun backend
  */
 export async function runQuantumProgramCode(
   request: AIChatRequest
@@ -243,26 +262,8 @@ export async function runQuantumProgramCode(
   }
 
   try {
-    const payload = {
-      input_value: request.message,
-      output_type: "chat",
-      input_type: "chat",
-      session_id: request.sessionId || "user_1",
-      prompt: request.message,
-    }
-
-    const options = {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    }
-
-    const response = await fetch(process.env.NEXT_PUBLIC_RUNCODE_URL!, options)
-    if (!response.ok) {
-      throw new Error(`API request failed with status ${response.status}`)
-    }
-
-    const result = await response.json()
+    const payload = buildChatPayload(request.message, request.sessionId || "user_1")
+    const result = await postJson(process.env.NEXT_PUBLIC_RUNCODE_URL!, payload)
     const message = extractMessageFromResponse(result)
 
     return {
@@ -292,26 +293,8 @@ export async function generateAIChatResponse(
   }
 
   try {
-    const payload = {
-      input_value: request.message,
-      output_type: "chat",
-      input_type: "chat",
-      session_id: request.sessionId || "user_1",
-      prompt: request.message,
-    }
-
-    const options = {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    }
-
-    const response = await fetch(process.env.NEXT_PUBLIC_API_URL!, options)
-    if (!response.ok) {
-      throw new Error(`API request failed with status ${response.status}`)
-    }
-
-    const result = await response.json()
+    const payload = buildChatPayload(request.message, request.sessionId || "user_1")
+    const result = await postJson(process.env.NEXT_PUBLIC_API_URL!, payload)
     const message = extractMessageFromResponse(result)
 
     return {
@@ -455,7 +438,7 @@ function determineQiskitPatternStep(nodeType: string, parameterName: string): st
 /**
  * Format parameter value for the prompt, handling both simple values and complex objects
  */
-function formatParameterValue(parameterName: string, value: any): string {
+function formatParameterValue(parameterName: string, value: ParameterValue): string {
   // Special handling for molecule parameter with detailed molecular definitions
   if (parameterName === 'molecule') {
     const molecularDefinitions: { [key: string]: string } = {
@@ -573,7 +556,7 @@ mol.build(
 )`
     }
     
-    const moleculeCode = molecularDefinitions[value] || molecularDefinitions['H2']
+    const moleculeCode = molecularDefinitions[String(value)] || molecularDefinitions['H2']
     return `    Selected molecule: ${value}
     
 REPLACE THE ENTIRE MOLECULAR DEFINITION with this exact code (DO NOT include #### INPUT PYTHON or #### END INPUT PYTHON markers):
@@ -631,7 +614,7 @@ Respond with ONLY the improved Python code. Do not include markdown formatting o
 /**
  * Extract code from AI response
  */
-function extractCodeFromResponse(result: any): string {
+function extractCodeFromResponse(result: BackendResponse): string {
   let newCode = ""
 
   if (result.response) { // Handle maestro api response
@@ -650,7 +633,7 @@ function extractCodeFromResponse(result: any): string {
 /**
  * Extract message from AI response for chat
  */
-function extractMessageFromResponse(result: any): string {
+function extractMessageFromResponse(result: BackendResponse): string {
   let message = ""
 
   if (result.response) { // Handle maestro api response
