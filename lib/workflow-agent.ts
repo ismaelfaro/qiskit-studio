@@ -121,15 +121,50 @@ Do not include any explanation, comments, or markdown fences.`
  * and surrounding prose by locating the outermost braces).
  */
 function extractJsonObject(text: string): unknown {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)
-  const candidate = fenced ? fenced[1] : text
+  // Reasoning models (e.g. nex-n2-pro) wrap chain-of-thought in <think> tags and
+  // emit stray braces/punctuation around the answer. Strip the reasoning first.
+  let cleaned = text.replace(/<think>[\s\S]*?<\/think>/gi, "")
 
-  const start = candidate.indexOf("{")
-  const end = candidate.lastIndexOf("}")
-  if (start === -1 || end === -1 || end <= start) {
-    throw new Error("No JSON object found in agent response")
+  // Prefer the contents of a fenced ```json block when present.
+  const fenced = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  if (fenced) cleaned = fenced[1]
+
+  // Scan for every balanced {...} object and return the first that both parses
+  // and looks like a workflow (has nodes/edges); else the last that parses. This
+  // is robust to prose/reasoning that contains unrelated braces or "?" tokens.
+  const candidates: string[] = []
+  let depth = 0
+  let startIdx = -1
+  for (let i = 0; i < cleaned.length; i++) {
+    const ch = cleaned[i]
+    if (ch === "{") {
+      if (depth === 0) startIdx = i
+      depth++
+    } else if (ch === "}") {
+      if (depth > 0) {
+        depth--
+        if (depth === 0 && startIdx !== -1) {
+          candidates.push(cleaned.slice(startIdx, i + 1))
+          startIdx = -1
+        }
+      }
+    }
   }
-  return JSON.parse(candidate.slice(start, end + 1))
+
+  let lastParsed: unknown
+  for (const c of candidates) {
+    try {
+      const parsed = JSON.parse(c)
+      if (parsed && typeof parsed === "object" && "nodes" in parsed && "edges" in parsed) {
+        return parsed
+      }
+      lastParsed = parsed
+    } catch {
+      // skip non-JSON brace groups (reasoning, code snippets, etc.)
+    }
+  }
+  if (lastParsed !== undefined) return lastParsed
+  throw new Error("No JSON object found in agent response")
 }
 
 /**

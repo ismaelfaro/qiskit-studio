@@ -7,18 +7,22 @@
 #   docker compose --profile preload up  # also (re)populate the vector DB with Qiskit docs
 #
 # Prerequisites:
-#   * An OpenAI-compatible LLM endpoint reachable from the containers. By default
-#     this points at a host-local Ollama (http://host.docker.internal:11434/v1)
-#     serving `granite3.3:8b` (chat/codegen) and `nomic-embed-text` (embeddings).
-#     Pull them first:  ollama pull granite3.3:8b && ollama pull nomic-embed-text
-#   * Copy .env.docker.template to .env to override any of the defaults below.
+#   * An OpenAI-compatible LLM endpoint. By default chat/codegen use OpenRouter
+#     (model from LLM_MODEL, default nex-agi/nex-n2-pro:free) — set OPENAI_API_KEY in
+#     .env. Embeddings still need a real embeddings provider; the default is a
+#     host-local Ollama serving `nomic-embed-text` (ollama pull nomic-embed-text).
+#   * Copy .env.docker.template to .env to set your key and override defaults.
 #
 # All knobs come from the environment (see .env.docker.template) and fall back to
 # sane local defaults, so `docker compose up --build` works out of the box.
 
 x-llm-env: &llm-env
-  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-http://host.docker.internal:11434/v1}
+  # Defaults target OpenRouter (OpenAI-compatible). Set OPENAI_API_KEY in .env
+  # (copy .env.docker.template). Model comes from LLM_MODEL below.
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://openrouter.ai/api/v1}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-dummy}
+  # LLM model for chat + codegen agents.
+  LLM_MODEL: ${LLM_MODEL:-nex-agi/nex-n2-pro:free}
   CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-http://localhost:3000}
 
 services:
@@ -70,32 +74,28 @@ services:
         condition: service_healthy
 
   # ---------------------------------------------------------------------------
-  # Chat agent (Maestro) — RAG-backed Q&A. Port 8000.
-  # The agents.docker.yaml override points the vector-DB agent at the
-  # knowledge-mcp service instead of localhost.
+  # Chat agent (FastAPI -> OpenRouter) — Q&A. Port 8000.
   # ---------------------------------------------------------------------------
   chat-agent:
     build:
       context: ./api/chat-agent
     environment:
       <<: *llm-env
+      AGENT_MODE: chat
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    volumes:
-      - ./api/chat-agent/agents.docker.yaml:/usr/src/app/agents.yaml:ro
     ports:
       - "${CHAT_PORT:-8000}:8000"
-    depends_on:
-      - knowledge-mcp
 
   # ---------------------------------------------------------------------------
-  # Codegen agent (Maestro) — parameter/code updates. Port 8001 -> 8000.
+  # Codegen agent (FastAPI -> OpenRouter) — parameter/code updates. 8001 -> 8000.
   # ---------------------------------------------------------------------------
   codegen-agent:
     build:
       context: ./api/codegen-agent
     environment:
       <<: *llm-env
+      AGENT_MODE: codegen
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -107,6 +107,10 @@ services:
   coderun-agent:
     build:
       context: ./api/coderun-agent
+    environment:
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-http://localhost:3000}
+      # Optional shared secret; when set, /run requires the X-API-Key header.
+      CODERUN_API_KEY: ${CODERUN_API_KEY:-}
     ports:
       - "${CODERUN_PORT:-8002}:8000"
 

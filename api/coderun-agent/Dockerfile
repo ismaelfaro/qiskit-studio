@@ -8,25 +8,28 @@ USER 0
 RUN dnf install -y openssl-devel rustc cargo openblas-devel pkgconf && \
     dnf clean all
 
+# Set the working directory and make it writable by the non-root user. Building
+# the local package (`uv pip install .`) writes a *.egg-info dir into /app, so it
+# must be owned by USER 1001 or the build fails with "Permission denied".
+WORKDIR /app
+RUN chown -R 1001:1001 /app
+
 # Switch back to the default non-root user (best practice)
 USER 1001
 
 # Need to use correct pythong version
 ENV PATH="/opt-app-root/bin:${PATH}"
 
-# Set the working directory for the application.
-WORKDIR /app
-
 # Install UV
 RUN /opt/app-root/bin/python3 -m pip install uv
 
-# Dependencies
-COPY pyproject.toml uv.lock ./
+# Dependencies. README.md is included because pyproject.toml declares it as the
+# project readme; the build backend errors if it is missing.
+COPY --chown=1001:1001 pyproject.toml uv.lock README.md ./
 RUN uv pip install --system --python /opt/app-root/bin/python3 .
 
-# Copy app 
-COPY agent.py .
-COPY log_conf.yml .
+# Copy app
+COPY --chown=1001:1001 agent.py log_conf.yml ./
 
 # server port.
 EXPOSE 8000

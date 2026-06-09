@@ -5,7 +5,7 @@
 
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, memo } from "react"
 import { Handle, Position, type NodeProps } from "reactflow"
 import { Card } from "@/components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -35,7 +35,9 @@ interface RuntimeNodeData {
   isUpdating?: boolean
 }
 
-export const RuntimeNode = ({ id, data, isConnectable }: NodeProps<RuntimeNodeData>) => {
+// memo: ReactFlow re-renders all nodes on canvas state changes; every other
+// node component in this directory is memoized — this one was missed.
+export const RuntimeNode = memo(({ id, data, isConnectable }: NodeProps<RuntimeNodeData>) => {
 
   const [options, setOptions] = useState({
     resilience_level: 1,
@@ -802,4 +804,6 @@ export const RuntimeNode = ({ id, data, isConnectable }: NodeProps<RuntimeNodeDa
       </Handle>
     </Card>
   )
-}
+})
+
+RuntimeNode.displayName = "RuntimeNode"

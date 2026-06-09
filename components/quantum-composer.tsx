@@ -37,7 +37,6 @@ import { PostProcessNode } from "./nodes/post-process-node"
 import { generateQiskitCode } from "@/lib/code-generator"
 import { getDemoById } from "@/lib/demo-circuits"
 import { loadDemoPythonCode, hasDemoPythonCode } from "@/lib/demo-python-loader"
-import { getHighlightedCodeForNode } from "@/lib/code-section-parser"
 import { parseDemoNodes } from "@/lib/demo-node-parser"
 import { useAICodeGeneration } from "@/hooks/useAICodeGeneration"
 import { WorkflowAgentPanel } from "./workflow-agent-panel"
@@ -488,122 +487,89 @@ function QuantumComposerInner() {
     return configCode + '\n'
   }, [backendConfig])
 
-  const getBackendConfigOffset = () => {
-    if (!backendConfig || !demoPythonCode) return 0
-    return 0
-  }
+  // Python code for a single node: prefer the code stored on the node (demo
+  // example code, or code generated when a workflow is created); otherwise
+  // synthesize it from the node definition.
+  const getNodePythonCode = useCallback((node: Node): string => {
+    const stored = node.data?.pythonCode
+    if (typeof stored === "string" && stored.trim()) return stored
+    const related = edges.filter((e) => e.source === node.id || e.target === node.id)
+    return generateQiskitCode([node], related)
+  }, [edges])
 
+  // The "all" view: the concatenation of every node's python, ordered by data
+  // flow (edges) so it reads like a program. This is the SAME per-node code shown
+  // when a node is selected, so "select a node" and "click background" are always
+  // consistent — no separately reconstructed program is kept. The chosen backend
+  // config (if any) is prepended as the only non-node header.
+  const getAllNodesCode = useCallback((): string => {
+    const indeg = new Map<string, number>()
+    nodes.forEach((n) => indeg.set(n.id, 0))
+    edges.forEach((e) => {
+      if (indeg.has(e.target)) indeg.set(e.target, (indeg.get(e.target) || 0) + 1)
+    })
+    const queue = nodes.filter((n) => (indeg.get(n.id) || 0) === 0)
+    const ordered: Node[] = []
+    const seen = new Set<string>()
+    while (queue.length) {
+      const n = queue.shift()!
+      if (seen.has(n.id)) continue
+      seen.add(n.id)
+      ordered.push(n)
+      edges
+        .filter((e) => e.source === n.id)
+        .forEach((e) => {
+          const d = (indeg.get(e.target) || 0) - 1
+          indeg.set(e.target, d)
+          if (d <= 0) {
+            const t = nodes.find((x) => x.id === e.target)
+            if (t && !seen.has(t.id)) queue.push(t)
+          }
+        })
+    }
+    // Append any nodes left out by cycles / disconnection, in canvas order.
+    nodes.forEach((n) => {
+      if (!seen.has(n.id)) ordered.push(n)
+    })
+
+    const body = ordered
+      .map(getNodePythonCode)
+      .filter((c) => c.trim())
+      .join("\n\n")
+    const backend = generateBackendConfig()
+    return backend ? backend + body : body
+  }, [nodes, edges, getNodePythonCode, generateBackendConfig])
 
   useEffect(() => {
-    if (currentDemoId && demoPythonCode) {
-      let reconstructedCode = demoPythonCode;
-
-      // Replace pythonCode changes
-      nodes.forEach(node => {
-        const initialNodeData = initialParsedNodeData[node.data.label];
-        if (initialNodeData && node.data.pythonCode && initialNodeData.pythonCode !== node.data.pythonCode) {
-          reconstructedCode = reconstructedCode.replace(initialNodeData.pythonCode, node.data.pythonCode);
-        }
-      });
-
-      // Handle INPUT PYTHON section replacements for chemistry nodes and others
-      Object.entries(nodeInputs).forEach(([nodeId, inputCode]) => {
-        if (inputCode.trim()) {
-          const node = nodes.find(n => n.id === nodeId);
-          if (node && node.data.inputCode) {
-            const inputSectionRegex = /(####?\s*INPUT PYTHON[\s\S]*?)(####?\s*END INPUT PYTHON|######\s*END INPUT PYTHON)/g;
-            reconstructedCode = reconstructedCode.replace(inputSectionRegex, (match, start, end) => {
-              return start.split('\n')[0] + '\n' + inputCode.trim() + '\n' + end;
-            });
-          }
-        }
-      });
-
-      // Handle backend configuration
-      const backendConfigCode = generateBackendConfig();
-      const hasOriginalStep0 = reconstructedCode.includes('## STEP 0 : IBM Quantum Config');
-      
-      if (backendConfigCode && hasOriginalStep0) {
-        const lines = reconstructedCode.split('\n');
-        const cleanedLines = [];
-        let skipIBMConfig = false;
-        
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i];
-          
-          if (line.includes('## STEP 0 : IBM Quantum Config')) {
-            skipIBMConfig = true;
-            continue;
-          }
-          
-          if (skipIBMConfig) {
-            if (line.includes('from qiskit_ibm_runtime import QiskitRuntimeService') ||
-                line.includes('service = QiskitRuntimeService()') ||
-                line.includes('backend = service.backend') ||
-                line.includes('backend = service.least_busy') ||
-                line.trim() === '') {
-              continue;
-            }
-            
-            if (line.startsWith('##') || (line.trim() !== '' && !line.includes('from qiskit_ibm_runtime'))) {
-              skipIBMConfig = false;
-            }
-          }
-          
-          if (!skipIBMConfig) {
-            cleanedLines.push(line);
-          }
-        }
-        
-        setFullCode(backendConfigCode + cleanedLines.join('\n'));
-      } else if (backendConfigCode && !hasOriginalStep0) {
-        setFullCode(backendConfigCode + reconstructedCode);
-      } else {
-        setFullCode(reconstructedCode);
-      }
-      
-      // Clear pending chemistry updates only when the expected molecular code is actually in fullCode
-      if (pendingChemistryUpdates.size > 0) {
-        const updatesStillPending = new Set<string>();
-        const changesStillPending = new Map<string, string>();
-        
-        pendingChemistryUpdates.forEach(nodeId => {
-          const expectedCode = expectedMolecularChanges.get(nodeId);
-          if (expectedCode && reconstructedCode.includes(expectedCode)) {
-            // The expected molecular code is now in the full code, remove from pending
-          } else {
-            // Still waiting for this update to be reflected
-            updatesStillPending.add(nodeId);
-            if (expectedCode) {
-              changesStillPending.set(nodeId, expectedCode);
-            }
-          }
-        });
-        
-        setPendingChemistryUpdates(updatesStillPending);
-        setExpectedMolecularChanges(changesStillPending);
-      }
-
-    } else if (!currentDemoId) {
-      // Handle non-demo cases
-      const baseCode = selectedNode
-        ? generateQiskitCode(
-            [selectedNode],
-            edges.filter((e) => e.source === selectedNode.id || e.target === selectedNode.id),
-          )
-        : generateQiskitCode(nodes, edges);
-      setFullCode(baseCode);
-      
-      // Clear any pending updates since we're not in demo mode
-      if (pendingChemistryUpdates.size > 0) {
-        setPendingChemistryUpdates(new Set());
-        setExpectedMolecularChanges(new Map());
-      }
+    // A node is selected -> show ONLY that node's python.
+    // Click the background (no selection) -> show all nodes' python concatenated.
+    if (selectedNode) {
+      setFullCode(getNodePythonCode(selectedNode))
+      return
     }
 
-  }, [nodes, edges, selectedNode, currentDemoId, demoPythonCode, initialParsedNodeData, nodeInputs, pendingChemistryUpdates, expectedMolecularChanges, backendConfig, generateBackendConfig]);
+    const allCode = getAllNodesCode()
+    setFullCode(allCode)
 
-  const onConnect = (params: Edge | Connection) => {
+    // Resolve pending chemistry updates against the concatenated code.
+    if (pendingChemistryUpdates.size > 0) {
+      const stillPending = new Set<string>()
+      const stillChanges = new Map<string, string>()
+      pendingChemistryUpdates.forEach((nodeId) => {
+        const expected = expectedMolecularChanges.get(nodeId)
+        if (!(expected && allCode.includes(expected))) {
+          stillPending.add(nodeId)
+          if (expected) stillChanges.set(nodeId, expected)
+        }
+      })
+      if (stillPending.size !== pendingChemistryUpdates.size) {
+        setPendingChemistryUpdates(stillPending)
+        setExpectedMolecularChanges(stillChanges)
+      }
+    }
+  }, [selectedNode, getNodePythonCode, getAllNodesCode, pendingChemistryUpdates, expectedMolecularChanges]);
+
+  const onConnect = useCallback((params: Edge | Connection) => {
     let edgeStyle = { stroke: "#2563EB" }
 
     const sourceNode = nodes.find((node) => node.id === params.source)
@@ -621,34 +587,20 @@ function QuantumComposerInner() {
     setCurrentDemoId(null)
     setDemoPythonCode(null)
     setHighlightSection(null)
-  }
+  }, [nodes, setEdges])
 
-  const onNodeClick = (_: React.MouseEvent, node: Node) => {
+  // Select a node -> Code Window shows only that node's python (handled by the
+  // effect). No section highlight needed since the whole panel is the node code.
+  const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
     setSelectedNode(node)
-    
-    if (currentDemoId && demoPythonCode) {
-      const highlighted = getHighlightedCodeForNode(
-        demoPythonCode,
-        node.type || '',
-        node.data?.category,
-        node.data?.label
-      )
-      
-      if (highlighted.highlightSection) {
-        const offset = getBackendConfigOffset()
-        const adjustedHighlightSection = {
-          ...highlighted.highlightSection,
-          startLine: highlighted.highlightSection.startLine + offset,
-          endLine: highlighted.highlightSection.endLine + offset
-        }
-        setHighlightSection(adjustedHighlightSection)
-      } else {
-        setHighlightSection(null)
-      }
-    } else {
-      setHighlightSection(null)
-    }
-  }
+    setHighlightSection(null)
+  }, [])
+
+  // Click the background -> deselect -> Code Window shows all nodes' python.
+  const onPaneClick = useCallback(() => {
+    setSelectedNode(null)
+    setHighlightSection(null)
+  }, [])
 
   const onAddNode = useCallback((nodeType: string, nodeData: any) => {
     const newNode = {
@@ -738,15 +690,28 @@ function QuantumComposerInner() {
 
   // Apply an AI-generated workflow, replacing the current canvas
   const applyGeneratedWorkflow = useCallback((workflow: GeneratedWorkflow) => {
-    const enhancedNodes = workflow.nodes.map(node => ({
-      ...node,
-      data: {
-        ...node.data,
-        onInputChange: handleNodeInputChange,
-        onParameterChange: handleParameterChange,
-        isUpdating: false
+    const enhancedNodes = workflow.nodes.map(node => {
+      // Ensure every generated node carries its own python code, so selecting it
+      // shows the node's code and the background view concatenates them all.
+      const related = workflow.edges.filter(
+        (e) => e.source === node.id || e.target === node.id,
+      )
+      const existing = node.data?.pythonCode
+      const pythonCode =
+        typeof existing === "string" && existing.trim()
+          ? existing
+          : generateQiskitCode([node], related)
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          pythonCode,
+          onInputChange: handleNodeInputChange,
+          onParameterChange: handleParameterChange,
+          isUpdating: false
+        }
       }
-    }))
+    })
 
     setNodes(enhancedNodes)
     setEdges(workflow.edges)
@@ -777,6 +742,7 @@ function QuantumComposerInner() {
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
             onNodeClick={onNodeClick}
+            onPaneClick={onPaneClick}
             nodeTypes={nodeTypes}
             fitView
             defaultViewport={{ x: 0, y: 0, zoom: 0.6 }}

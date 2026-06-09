@@ -23,7 +23,7 @@ export function WorkflowAgentPanel({
   getCurrentWorkflow,
   onApplyWorkflow,
 }: WorkflowAgentPanelProps) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(true)
   const [prompt, setPrompt] = useState("")
   const [isGenerating, setIsGenerating] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -75,7 +75,7 @@ export function WorkflowAgentPanel({
   }
 
   return (
-    <div className="absolute top-4 left-1/2 z-10 w-[min(90vw,40rem)] -translate-x-1/2 rounded-xl border border-gray-200 bg-white p-4 shadow-2xl">
+    <div className="absolute top-4 left-72 right-4 z-[60] mx-auto max-w-[40rem] rounded-xl border border-gray-200 bg-white p-4 shadow-2xl">
       <div className="mb-2 flex items-center justify-between">
         <div className="flex items-center gap-2 text-sm font-semibold text-gray-800">
           <Sparkles className="h-4 w-4 text-blue-600" />
@@ -99,7 +99,7 @@ export function WorkflowAgentPanel({
         rows={3}
         autoFocus
         placeholder="e.g. Build a CHSH inequality experiment: a Bell circuit, transpile it, run with the Sampler, then plot a histogram."
-        className="w-full resize-y rounded-lg border border-gray-300 p-3 text-sm text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-60"
+        className="w-full resize-y rounded-lg border border-gray-300 p-3 text-sm text-white placeholder:text-gray-300 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-60"
       />
 
       {error && (

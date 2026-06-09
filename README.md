@@ -38,43 +38,73 @@ Qiskit Studio is a visual quantum computing development environment that bridges
 
 ### Prerequisites
 - [Node.js](https://nodejs.org/) (v18 or higher)
+- [pnpm](https://pnpm.io/installation) (frontend package manager)
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) (for Python dependencies)
 - [Ollama](https://ollama.com) (for local LLM support)
+- [Docker](https://docs.docker.com/get-docker/) or [Colima](https://github.com/abiosoft/colima) (optional — full stack / coderun on Intel macOS)
 
-### Installation
+### Run the whole stack with one command (recommended)
 
-1. **Clone the repository:**
 ```bash
 git clone https://github.com/AI4quantum/qiskit-studio
 cd qiskit-studio
+./scripts/dev.sh           # or: pnpm run dev:all
 ```
 
-2. **Install dependencies:**
+`scripts/dev.sh` starts the frontend and all three Python agents together,
+streaming colour-prefixed logs. It:
+
+- seeds missing `.env` files from the templates on first run,
+- installs frontend dependencies (`pnpm install`) if `node_modules` is absent,
+- frees ports `3000`/`8000`/`8001`/`8002` from any previous run before starting,
+- tears the whole stack down cleanly on `Ctrl+C` (no orphaned processes/ports).
+
+| Service       | URL                          |
+| ------------- | ---------------------------- |
+| frontend      | http://localhost:3000        |
+| chat-agent    | http://127.0.0.1:8000/chat   |
+| codegen-agent | http://127.0.0.1:8001/chat   |
+| coderun-agent | http://127.0.0.1:8002/run    |
+
+Useful environment overrides:
+
 ```bash
-npm install
+FRONTEND_PORT=4000 ./scripts/dev.sh   # change any of {FRONTEND,CHAT,CODEGEN,CODERUN}_PORT
+SKIP_CODERUN=1 ./scripts/dev.sh       # don't start coderun-agent locally
+CODERUN_DOCKER=1 ./scripts/dev.sh     # run coderun-agent in Docker instead of local uv
 ```
 
-3. **Set up environment:**
+> **Intel macOS note:** `jax`/`jaxlib` no longer publish x86_64 macOS wheels, so
+> `coderun-agent` can't run natively on Intel Macs. `scripts/dev.sh` detects this
+> and auto-skips it; use `CODERUN_DOCKER=1 ./scripts/dev.sh` to run it in a
+> container (Apple Silicon and Linux run it natively).
+
+This does **not** start the RAG vector DB (Milvus + knowledge-mcp). For the full
+RAG stack, use Docker Compose instead — see [api/README.md](api/README.md).
+
+### Manual setup
+
+If you prefer to run services individually:
+
+1. **Install frontend dependencies:**
+```bash
+pnpm install
+```
+
+2. **Set up environment:**
 ```bash
 cp .env.local.template .env.local
 # Edit .env.local with your configuration
 ```
 
-4. **Start the development server:**
-
+3. **Start the frontend:**
 ```bash
-npm run dev
+pnpm run dev
 ```
 
-5. **Setup and start the Maestro workflow API:**
+4. **Set up and start the Maestro workflow API:** see [api/README.md](api/README.md)
 
-
-[api/README.md](api/README.md)
-
-
-6. **Access the web application:**
-
-[`http://localhost:3000`](http://localhost:3000)
+5. **Access the web application:** [`http://localhost:3000`](http://localhost:3000)
 
 ### Docker Deployment
 
@@ -183,10 +213,12 @@ qiskit-studio/
 
 ### Available Scripts
 ```bash
-npm run dev         # Start development server
-npm run build       # Build for production
-npm run start       # Start production server
-npm run lint        # Run ESLint
+./scripts/dev.sh    # Start the whole local stack (frontend + 3 agents)
+pnpm run dev:all    # Same as ./scripts/dev.sh
+pnpm run dev        # Start frontend dev server only
+pnpm run build      # Build for production
+pnpm run start      # Start production server
+pnpm run lint       # Run ESLint
 ```
 
 

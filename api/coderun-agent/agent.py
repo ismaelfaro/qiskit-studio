@@ -1,7 +1,7 @@
 # Copyright contributors to the Qiskit Studio project
 # SPDX-License-Identifier: Apache-2.0
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -10,10 +10,9 @@ import socket
 import argparse
 import subprocess
 import sys
+import os
 import asyncio
-import io
 import logging
-import contextlib
 import json
 from json.decoder import JSONDecodeError
 import re
@@ -21,22 +20,58 @@ import re
 # Global variable to control execution mode
 LOCAL_MODE = True
 
+# Hard limits for sandboxed user-code execution.
+EXEC_TIMEOUT_SECONDS = int(os.environ.get("CODERUN_TIMEOUT_SECONDS", str(30 * 60)))
+EXEC_MEMORY_BYTES = int(os.environ.get("CODERUN_MEMORY_BYTES", str(2 * 1024 * 1024 * 1024)))
+EXEC_CPU_SECONDS = int(os.environ.get("CODERUN_CPU_SECONDS", str(30 * 60)))
+
+# Optional shared-secret auth. When CODERUN_API_KEY is set, every /run request
+# must carry it in the `X-API-Key` header. Unset = open (local dev only).
+API_KEY = os.environ.get("CODERUN_API_KEY")
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
+if not API_KEY:
+    logger.warning(
+        "CODERUN_API_KEY is not set: the /run endpoint is UNAUTHENTICATED. "
+        "Set it (and bind to 127.0.0.1) outside trusted local development."
+    )
+
 app = FastAPI()
 
 
-# CORS
+def require_api_key(request: Request) -> None:
+    """Reject requests lacking the shared secret, when one is configured."""
+    if not API_KEY:
+        return
+    provided = request.headers.get("x-api-key")
+    if not provided or not _constant_time_eq(provided, API_KEY):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+def _constant_time_eq(a: str, b: str) -> bool:
+    import hmac
+
+    return hmac.compare_digest(a, b)
+
+
+# CORS — origins come from CORS_ALLOW_ORIGINS (comma-separated), matching the
+# other agents. Defaults to the local frontend. No wildcard + credentials combo.
+_cors_origins = [
+    o.strip()
+    for o in os.environ.get("CORS_ALLOW_ORIGINS", "http://localhost:3000").split(",")
+    if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_cors_origins,
+    allow_credentials=False,
+    allow_methods=["POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-API-Key"],
 )
 
 # Add exception handler for JSON decode errors
@@ -58,7 +93,7 @@ def replace_ibm_quantum_config(code: str, ibm_config: dict = None) -> str:
         instance = ibm_config.get("instance")
         region = ibm_config.get("region")
 
-        logger.info(f"IBM config provided. Injecting token: {token[:10]}...")
+        logger.info("IBM config provided. Injecting token (value redacted).")
         logger.info(
             f"Channel: {channel}, Instance: {'yes' if instance else 'no'}, Region: {region or 'none'}"
         )
@@ -189,54 +224,90 @@ print("Using local simulator...")"""
     return code
 
 
+def _apply_resource_limits() -> None:
+    """preexec_fn for the sandbox subprocess: start a new session (so the child
+    can't signal the parent) and cap CPU time, address space, and core dumps.
+
+    Limits are best-effort: some platforms (notably macOS) reject RLIMIT_AS, so
+    each is applied independently and failures are ignored. On Linux containers
+    — the production target — all three are enforced.
+    """
+    import resource
+
+    try:
+        os.setsid()
+    except OSError:
+        pass
+    for res, limit in (
+        (resource.RLIMIT_CPU, EXEC_CPU_SECONDS),
+        (resource.RLIMIT_AS, EXEC_MEMORY_BYTES),
+        (resource.RLIMIT_CORE, 0),
+    ):
+        try:
+            resource.setrlimit(res, (limit, limit))
+        except (ValueError, OSError):
+            pass
+
+
 def execute_python_code(code: str, ibm_config: dict = None) -> str:
-    """Execute Python code and capture stdout/stderr."""
+    """Execute user code in an isolated subprocess and capture stdout/stderr.
+
+    The code runs in a fresh `python -I` interpreter (isolated mode: ignores
+    PYTHON* env vars and the user site dir) with a scrubbed environment, CPU/
+    memory rlimits, and a wall-clock timeout. This contains the blast radius of
+    untrusted code far better than an in-process exec(), which shared this
+    server's interpreter state, builtins, and full privileges.
+
+    NOTE: this does not block network access. For untrusted multi-tenant use,
+    run this service inside a network-isolated sandbox (nsjail/gVisor/container
+    with no egress).
+    """
     logger.info("Beginning code execution process.")
     # Replace IBM Quantum Config section automatically
     code = replace_ibm_quantum_config(code, ibm_config)
-    logger.info("Code transformation complete. Preparing execution environment.")
+    logger.info("Code transformation complete. Preparing isolated execution.")
 
-    stdout_capture = io.StringIO()
-    stderr_capture = io.StringIO()
+    # Minimal environment: keep PATH and IBM-runtime needs, drop everything else
+    # (e.g. CODERUN_API_KEY, OPENAI_API_KEY) so user code cannot read our secrets.
+    clean_env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": os.environ.get("HOME", "/tmp"),
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+    }
 
     try:
-        # Create execution namespace with common imports
-        exec_globals = {
-            "__builtins__": __builtins__,
-        }
+        logger.info("Executing user-provided code in isolated subprocess.")
+        proc = subprocess.run(
+            [sys.executable, "-I", "-"],
+            input=code,
+            capture_output=True,
+            text=True,
+            timeout=EXEC_TIMEOUT_SECONDS,
+            env=clean_env,
+            preexec_fn=_apply_resource_limits,
+        )
+        logger.info("Finished executing user-provided code (rc=%s).", proc.returncode)
 
-        with (
-            contextlib.redirect_stdout(stdout_capture),
-            contextlib.redirect_stderr(stderr_capture),
-        ):
-            logger.info("Executing user-provided code via exec().")
-            exec(code, exec_globals)
-            logger.info("Finished executing user-provided code.")
-
-        stdout_output = stdout_capture.getvalue()
-        stderr_output = stderr_capture.getvalue()
-
-        output = ""
-        if stdout_output:
-            output += stdout_output
-        if stderr_output:
-            output += stderr_output
-
-        logger.info("Successfully captured output from code execution.")
+        output = (proc.stdout or "") + (proc.stderr or "")
         return output if output else "Code executed successfully (no output)"
 
+    except subprocess.TimeoutExpired:
+        logger.warning("User code execution timed out.")
+        return f"Error: Code execution timed out after {EXEC_TIMEOUT_SECONDS} seconds."
     except Exception as e:
-        logger.error("An exception occurred during user code execution.", exc_info=True)
-        # Also capture any stderr that might have been produced before the exception
-        stderr_output = stderr_capture.getvalue()
-        return f"Error executing code: {str(e)}\n{stderr_output}"
+        logger.error("An exception occurred launching user code.", exc_info=True)
+        return f"Error executing code: {str(e)}"
 
 
 @app.post("/run")
-async def run_program(request: Request):
+async def run_program(request: Request, _auth: None = Depends(require_api_key)):
     logger.info("Received /run request from %s.", request.client.host)
     data = await request.json()
+    if not isinstance(data, dict) or "input_value" not in data:
+        raise HTTPException(status_code=400, detail="Missing 'input_value'")
     code = data["input_value"]
+    if not isinstance(code, str):
+        raise HTTPException(status_code=400, detail="'input_value' must be a string")
 
     ibm_token = data.get("ibm_token")  # Optional IBM Quantum token
     channel = data.get("channel", "ibm_quantum")  # Default to ibm_quantum
@@ -292,6 +363,11 @@ if __name__ == "__main__":
         "--port", type=int, default=8000, help="Port to run the server on"
     )
     parser.add_argument(
+        "--host",
+        default=os.environ.get("CODERUN_HOST", "127.0.0.1"),
+        help="Interface to bind (default 127.0.0.1; use 0.0.0.0 in containers)",
+    )
+    parser.add_argument(
         "--local",
         action="store_true",
         default=False,
@@ -314,4 +390,4 @@ if __name__ == "__main__":
         LOCAL_MODE = True
         logger.info("Starting in LOCAL mode (default) - replacing with AerSimulator")
 
-    uvicorn.run(app, host="0.0.0.0", port=args.port)
+    uvicorn.run(app, host=args.host, port=args.port)

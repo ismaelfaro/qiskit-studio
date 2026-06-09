@@ -5,7 +5,7 @@
 
 "use client"
 
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, useMemo } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { CopyIcon, PlayIcon, ChevronUp, ChevronDown, Send, Loader2, Maximize2, Minimize2, Sliders } from "lucide-react"
@@ -287,10 +287,8 @@ export function CodePanel({ code, selectedNode, onSelectDemo, highlightSection, 
           requestPayload.region = region.trim()
         }
         
-      } else {
-        console.log("🔑 Frontend: No IBM token provided")
       }
-      
+
 
       // Use environment variable for agent URL or fallback to runQuantumProgramCode
       const agentUrl = process.env.NEXT_PUBLIC_RUNCODE_URL
@@ -462,7 +460,9 @@ export function CodePanel({ code, selectedNode, onSelectDemo, highlightSection, 
     return segments;
   };
 
-  const renderCodeWithHighlighting = () => {
+  // Memoized: full-file syntax highlighting is O(lines × regex). Without memo it
+  // re-ran on every keystroke in the chat input (state lives in this component).
+  const highlightedCode = useMemo(() => {
     const lines = code.split('\n')
 
     return (
@@ -499,7 +499,7 @@ export function CodePanel({ code, selectedNode, onSelectDemo, highlightSection, 
         })}
       </pre>
     )
-  }
+  }, [code, highlightSection])
 
   useEffect(() => {
     if (highlightSection) {
@@ -917,7 +917,7 @@ export function CodePanel({ code, selectedNode, onSelectDemo, highlightSection, 
               </div>
             )}
             <div className="p-4 text-green-400 font-mono text-[10px] min-w-max">
-              {renderCodeWithHighlighting()}
+              {highlightedCode}
             </div>
           </div>
 
