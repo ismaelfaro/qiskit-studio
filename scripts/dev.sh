@@ -50,11 +50,17 @@ LLM_MODEL="${LLM_MODEL:-nex-agi/nex-n2-pro:free}"
 if [[ "$SKIP_CODERUN" != "1" && "$CODERUN_DOCKER" != "1" \
       && "$(uname -s)" == "Darwin" && "$(uname -m)" == "x86_64" ]]; then
   echo "Detected Intel macOS: jax/jaxlib has no x86_64 wheel, so coderun-agent"
-  echo "cannot run locally. Auto-setting SKIP_CODERUN=1."
-  echo "  -> run it in Docker instead:  CODERUN_DOCKER=1 ./scripts/dev.sh"
-  echo "     (or:  docker compose up --build coderun-agent)"
+  echo "cannot run locally."
+  if command -v docker >/dev/null 2>&1; then
+    # The coderun container IS the qiskit simulator (qiskit + qiskit-aer); the
+    # stack needs it to evaluate generated code, so run it in Docker.
+    echo "Docker found: auto-setting CODERUN_DOCKER=1 (qiskit simulator container)."
+    CODERUN_DOCKER=1
+  else
+    echo "Docker not found: auto-setting SKIP_CODERUN=1 (code execution disabled)."
+    SKIP_CODERUN=1
+  fi
   echo
-  SKIP_CODERUN=1
 fi
 
 ALL_PORTS=("$CHAT_PORT" "$CODEGEN_PORT" "$FRONTEND_PORT")

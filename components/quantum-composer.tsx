@@ -35,6 +35,7 @@ import { ChemistryNode } from "./nodes/chemistry-node"
 import { PythonNode } from "./nodes/python-node"
 import { PostProcessNode } from "./nodes/post-process-node"
 import { generateQiskitCode } from "@/lib/code-generator"
+import { runQuantumProgramCode } from "@/lib/api-service"
 import { getDemoById } from "@/lib/demo-circuits"
 import { loadDemoPythonCode, hasDemoPythonCode } from "@/lib/demo-python-loader"
 import { parseDemoNodes } from "@/lib/demo-node-parser"
@@ -171,7 +172,6 @@ function QuantumComposerInner() {
   const { fitView } = useReactFlow()
   const [selectedNode, setSelectedNode] = useState<Node | null>(null)
   const [currentDemoId, setCurrentDemoId] = useState<string | null>("chemistry-simulation")
-  const [demoPythonCode, setDemoPythonCode] = useState<string | null>(null)
   const [highlightSection, setHighlightSection] = useState<{
     startLine: number
     endLine: number
@@ -183,10 +183,8 @@ function QuantumComposerInner() {
     apiToken?: string
   } | null>(null)
   const [nodeInputs, setNodeInputs] = useState<{ [nodeId: string]: string }>({})
-  const [parsedNodeData, setParsedNodeData] = useState<{ [nodeId: string]: { pythonCode: string, inputCode?: string } }>({})
   const [nodeParameters, setNodeParameters] = useState<{ [nodeId: string]: any }>({})
   const [fullCode, setFullCode] = useState('');
-  const [initialParsedNodeData, setInitialParsedNodeData] = useState<{ [key: string]: { pythonCode: string, inputCode?: string } }>({});
   
   
   // Initialize AI code generation hook first
@@ -208,6 +206,28 @@ function QuantumComposerInner() {
       [nodeId]: newInput
     }));
   }, []);
+
+  // Send a generated code fragment to the coderun container (qiskit + qiskit-aer
+  // simulator) for evaluation, and record the result on the node. Fire-and-forget:
+  // the canvas stays responsive while fragments run inside the container.
+  const evaluateNodeFragment = useCallback((nodeId: string, code: string) => {
+    if (!code || !code.trim()) return
+    setNodes(curr => curr.map(n => n.id === nodeId
+      ? { ...n, data: { ...n.data, evalStatus: 'running' } }
+      : n))
+    runQuantumProgramCode({ message: code, sessionId: `eval-${nodeId}` })
+      .then((res) => {
+        const ok = res.success && !(res.message || '').startsWith('Error')
+        setNodes(curr => curr.map(n => n.id === nodeId
+          ? { ...n, data: { ...n.data, evalStatus: ok ? 'ok' : 'error', evalOutput: res.message || res.error } }
+          : n))
+      })
+      .catch((e) => {
+        setNodes(curr => curr.map(n => n.id === nodeId
+          ? { ...n, data: { ...n.data, evalStatus: 'error', evalOutput: String(e) } }
+          : n))
+      })
+  }, [setNodes])
 
   const handleUpdatePostProcessingNode = useCallback((resultJson: { type: 'text' | 'graph' | 'plot', content: string }) => {
     setNodes(currentNodes => {
@@ -376,15 +396,10 @@ function QuantumComposerInner() {
                   [nodeId]: response.code!
                 }));
               } else {
-                setParsedNodeData(prev => ({
-                  ...prev,
-                  [node.data.label]: {
-                    ...prev[node.data.label],
-                    pythonCode: response.code!
-                  }
-                }));
+                // Evaluate the LLM-generated fragment in the qiskit simulator container.
+                evaluateNodeFragment(nodeId, response.code!);
               }
-              
+
             } else {
               if (response.error) {
                 alert(`Failed to update code: ${response.error}`);
@@ -401,7 +416,7 @@ function QuantumComposerInner() {
         return currentNodes;
       });
     }, 0);
-  }, [generateCodeForParameter, setNodes, setParsedNodeData]);
+  }, [generateCodeForParameter, setNodes, evaluateNodeFragment]);
 
 
   useEffect(() => {
@@ -427,8 +442,9 @@ function QuantumComposerInner() {
   useEffect(() => {
     if (currentDemoId && hasDemoPythonCode(currentDemoId)) {
       loadDemoPythonCode(currentDemoId).then((code) => {
-        setDemoPythonCode(code);
-        
+
+        if (!code) return;
+
         const parsed = parseDemoNodes(code, currentDemoId || '');
         const nodeDataMap: { [key: string]: { pythonCode: string, inputCode?: string } } = {};
         
@@ -438,9 +454,6 @@ function QuantumComposerInner() {
             inputCode: node.inputCode
           };
         });
-        
-        setParsedNodeData(nodeDataMap);
-        setInitialParsedNodeData(nodeDataMap);
         
         setNodes(currentNodes => {
           const updatedNodes = currentNodes.map(node => {
@@ -466,8 +479,7 @@ function QuantumComposerInner() {
         });
       });
     } else {
-      setDemoPythonCode(null);
-      setParsedNodeData({});
+
     }
   }, [currentDemoId, handleNodeInputChange, handleParameterChange, isNodeCurrentlyUpdating, setNodes]);
 
@@ -491,8 +503,22 @@ function QuantumComposerInner() {
   // example code, or code generated when a workflow is created); otherwise
   // synthesize it from the node definition.
   const getNodePythonCode = useCallback((node: Node): string => {
-    const stored = node.data?.pythonCode
-    if (typeof stored === "string" && stored.trim()) return stored
+    let stored = node.data?.pythonCode
+    if (typeof stored === "string" && stored.trim()) {
+      // Merge the user's input code into the node's INPUT PYTHON section (the
+      // pre-refactor full-code view did this globally; now done per node).
+      const inputCode = node.data?.inputCode
+      if (typeof inputCode === "string" && inputCode.trim()) {
+        const inputSection = /(####?#?\s*INPUT PYTHON)[\s\S]*?(####?#?\s*END INPUT PYTHON)/
+        if (inputSection.test(stored)) {
+          stored = stored.replace(
+            inputSection,
+            (_m, start, end) => `${start}\n${inputCode.trim()}\n${end}`,
+          )
+        }
+      }
+      return stored
+    }
     const related = edges.filter((e) => e.source === node.id || e.target === node.id)
     return generateQiskitCode([node], related)
   }, [edges])
@@ -585,7 +611,7 @@ function QuantumComposerInner() {
 
     setEdges((eds) => addEdge({ ...params, animated: true, style: edgeStyle }, eds))
     setCurrentDemoId(null)
-    setDemoPythonCode(null)
+
     setHighlightSection(null)
   }, [nodes, setEdges])
 
@@ -626,7 +652,7 @@ function QuantumComposerInner() {
     setNodes((nds) => [...nds, enhancedNode])
     // Don't clear demo state when adding a new node - keep the full code intact
     // setCurrentDemoId(null)
-    // setDemoPythonCode(null)
+
     setHighlightSection(null)
   }, [handleNodeInputChange, handleParameterChange, isNodeUpdating, setNodes])
 
@@ -717,11 +743,14 @@ function QuantumComposerInner() {
     setEdges(workflow.edges)
     setSelectedNode(null)
     setCurrentDemoId(null)
-    setDemoPythonCode(null)
+
     setHighlightSection(null)
     setNodeInputs({})
     setTimeout(() => fitView({ padding: 0.1 }), 100)
-  }, [handleNodeInputChange, handleParameterChange, setNodes, setEdges, fitView])
+
+    // Evaluate every generated fragment inside the qiskit simulator container.
+    enhancedNodes.forEach((n) => evaluateNodeFragment(n.id, n.data.pythonCode))
+  }, [handleNodeInputChange, handleParameterChange, setNodes, setEdges, fitView, evaluateNodeFragment])
 
   return (
     <div className="flex h-screen">
